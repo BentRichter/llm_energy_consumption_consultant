@@ -33,5 +33,77 @@
         "arbeitspreis_ct_kwh": 11.2,
         "grundpreis_eur_jahr": 204.0,
         "energieart": "Gas"
+    },
+    {
+        "name": "Landstrom AKTIV",
+        "anbieter": "Stadtwerke Steinfurt",
+        "arbeitspreis_ct_kwh": 32.46,
+        "grundpreis_eur_jahr": 150.45,
+        "energieart": "Strom",
+        "quelle": "https://www.swst.de/strom/unsere-stromtarife",
+        "stand": "2026-01-01"
+    },
+    {
+        "name": "Grundversorgung Strom",
+        "anbieter": "Stadtwerke Steinfurt",
+        "arbeitspreis_ct_kwh": 35.70,
+        "grundpreis_eur_jahr": 150.45,
+        "energieart": "Strom",
+        "quelle": "https://www.swst.de/strom/unsere-stromtarife",
+        "stand": "2026-01-01"
+    },
+    {
+        "name": "Gas AKTIV",
+        "anbieter": "Stadtwerke Steinfurt",
+        "arbeitspreis_ct_kwh": 9.86,
+        "grundpreis_eur_jahr": 155.75,
+        "energieart": "Gas",
+        "quelle": "https://www.swst.de/erdgas-waerme/gastarife",
+        "stand": "2026-01-01"
+    },
+    {
+        "name": "Grundversorgung Gas",
+        "anbieter": "Stadtwerke Steinfurt",
+        "arbeitspreis_ct_kwh": 13.08,
+        "grundpreis_eur_jahr": 155.75,
+        "energieart": "Gas",
+        "quelle": "https://www.swst.de/erdgas-waerme/gastarife",
+        "stand": "2026-01-01"
+    },
+    {
+        "name": "Grundversorgung Strom",
+        "anbieter": "RheinEnergie",
+        "arbeitspreis_ct_kwh": 31.48,
+        "grundpreis_eur_jahr": 277.33,
+        "energieart": "Strom",
+        "quelle": "https://www.rheinenergie.com/ueber-uns/newsroom/presse/nachrichten/nachricht_77315.html",
+        "stand": "2026-01-01"
+    },
+    {
+        "name": "Grundversorgung Erdgas",
+        "anbieter": "RheinEnergie",
+        "arbeitspreis_ct_kwh": 12.34,
+        "grundpreis_eur_jahr": 172.55,
+        "energieart": "Gas",
+        "quelle": "https://www.rheinenergie.com/ueber-uns/newsroom/presse/nachrichten/nachricht_77315.html",
+        "stand": "2026-01-01"
+    },
+    {
+        "name": "BasisStrom",
+        "anbieter": "Stadtwerke Karlsruhe",
+        "arbeitspreis_ct_kwh": 33.65,
+        "grundpreis_eur_jahr": 200.21,
+        "energieart": "Strom",
+        "quelle": "https://www.stadtwerke-karlsruhe.de/de/pk/strom/grundversorgung-strom.php",
+        "stand": "2026-03-01"
+    },
+    {
+        "name": "BasisGas",
+        "anbieter": "Stadtwerke Karlsruhe",
+        "arbeitspreis_ct_kwh": 11.44,
+        "grundpreis_eur_jahr": 192.84,
+        "energieart": "Gas",
+        "quelle": "https://www.stadtwerke-karlsruhe.de/de/pk/erdgas/grundversorgung-gas.php",
+        "stand": "2026-03-01"
     }
 ]

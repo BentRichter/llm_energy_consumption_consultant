@@ -8,6 +8,25 @@ from src.tariff_calculator import calculate_current_cost, compare_tariffs
 load_dotenv()
 
 st.set_page_config(page_title="Energierechnung Analyzer", page_icon="⚡", layout="wide")
+
+
+def check_password():
+    if st.session_state.get("authenticated"):
+        return True
+    st.title("⚡ Energierechnung Analyzer")
+    password = st.text_input("Passwort", type="password")
+    if st.button("Anmelden"):
+        if password == st.secrets["APP_PASSWORD"]:
+            st.session_state["authenticated"] = True
+            st.rerun()
+        else:
+            st.error("Falsches Passwort.")
+    return False
+
+
+if not check_password():
+    st.stop()
+
 st.title("⚡ Energierechnung Analyzer")
 st.markdown("Lade ein Foto oder PDF deiner Jahresabrechnung hoch.")
 
