@@ -1,0 +1,30 @@
+[project]
+name = "energy-consumption-identifier"
+version = "0.1.0"
+description = "Extract energy consumption data from German energy bills and compare tariffs"
+requires-python = ">=3.12"
+dependencies = [
+    "anthropic>=0.84.0",
+    "streamlit>=1.41.0",
+    "PyMuPDF>=1.25.0",
+    "Pillow>=11.0.0",
+    "pillow-heif>=0.21.0",
+    "pydantic>=2.10.0",
+    "python-dotenv>=1.0.0",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0.0",
+    "ruff>=0.9.0",
+]
+
+[tool.ruff]
+line-length = 99
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "W", "UP"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
