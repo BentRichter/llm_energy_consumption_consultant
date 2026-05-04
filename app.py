@@ -1,304 +1,452 @@
 import streamlit as st
-from dotenv import load_dotenv
+from pydantic import ValidationError
 
+from src.email_sender import send_confirmation_to_user, send_internal_notification
 from src.extractor import extract_bill_data, extract_from_pdf
-from src.models import Energieart, EnergyBillData
-from src.tariff_calculator import calculate_current_cost, compare_tariffs, load_tariffs
+from src.models import EnergyBillData, Energieart, LeadData
+from src.supabase_client import save_lead
+from src.tariff_calculator import calculate_current_cost, compare_tariffs
 
-load_dotenv()
+st.set_page_config(
+    page_title="Energiekosten prüfen & sparen",
+    page_icon="⚡",
+    layout="centered",
+)
 
-st.set_page_config(page_title="Energierechnung Analyzer", page_icon="⚡", layout="wide")
-
+# ── Custom CSS ──────────────────────────────────────────────────────────────
 st.markdown(
     """
     <style>
-    .upload-box {
-        border: 2px dashed #4a9eff;
-        border-radius: 12px;
-        padding: 1.5rem;
-        background: #f8faff;
-    }
-    .cost-bar {
-        background: #f0f2f6;
-        border-radius: 10px;
-        padding: 1.2rem 1.5rem;
-        margin: 1rem 0;
-    }
-    .tariff-card {
-        border: 1px solid #e0e4ea;
-        border-radius: 10px;
-        padding: 0.9rem 1.1rem;
-        margin-bottom: 0.6rem;
-        background: #fff;
-    }
-    .tariff-card-best {
-        border: 2px solid #f5a623;
-        border-radius: 10px;
-        padding: 0.9rem 1.1rem;
-        margin-bottom: 0.6rem;
-        background: #fffdf5;
+    .funnel-step { font-size: 0.8rem; color: #888; margin-bottom: 0.5rem; }
+    .big-number { font-size: 2.5rem; font-weight: 700; color: #ff6b00; }
+    .savings-box {
+        background: #fff8f0; border: 2px solid #ff6b00;
+        border-radius: 12px; padding: 1.5rem; text-align: center;
     }
     </style>
     """,
     unsafe_allow_html=True,
 )
 
+# ── Session state init ───────────────────────────────────────────────────────
 
-def check_password():
-    if st.session_state.get("authenticated"):
-        return True
-    st.title("⚡ Energierechnung Analyzer")
-    with st.form("login"):
-        password = st.text_input("Passwort", type="password")
-        submitted = st.form_submit_button("Anmelden")
-    if submitted:
-        if password == st.secrets["APP_PASSWORD"]:
-            st.session_state["authenticated"] = True
-            st.rerun()
-        else:
-            st.error("Falsches Passwort.")
-    return False
+def _init_state() -> None:
+    defaults = {
+        "step": 1,
+        "bill_data": None,
+        "confidence": 0.0,
+        "upload_count": 0,
+        "best_tariff_comparison": None,
+        "current_cost": None,
+    }
+    for key, value in defaults.items():
+        if key not in st.session_state:
+            st.session_state[key] = value
 
 
-if not check_password():
-    st.stop()
+_init_state()
 
-st.title("⚡ Energierechnung Analyzer")
+# ── Step helpers ─────────────────────────────────────────────────────────────
 
-# ── Pre-upload: two-column layout ──────────────────────────────────────────
-if "bill_data" not in st.session_state:
-    col_upload, col_tariffs = st.columns([1, 1], gap="large")
+def _go_to(step: int) -> None:
+    st.session_state["step"] = step
+    st.rerun()
 
-    with col_upload:
-        st.markdown("#### Rechnung hochladen")
-        uploaded_file = st.file_uploader(
-            "Foto oder PDF deiner Jahresabrechnung",
-            type=["jpg", "jpeg", "png", "heic", "heif", "pdf"],
-            help="JPG, PNG, HEIC oder PDF",
-            label_visibility="collapsed",
+
+def _step_label(current: int, total: int = 6) -> None:
+    st.markdown(f'<p class="funnel-step">Schritt {current} von {total}</p>', unsafe_allow_html=True)
+
+
+# ── Step 1: Landing ──────────────────────────────────────────────────────────
+
+def step_landing() -> None:
+    st.title("Energie-Rechnung analysieren & sparen")
+    st.markdown(
+        """
+        Laden Sie Ihre aktuelle Jahresabrechnung hoch — in unter einer Minute sehen Sie,
+        wie viel Sie mit einem günstigeren Tarif sparen könnten.
+
+        **So funktioniert es:**
+        1. Rechnung hochladen (Foto oder PDF)
+        2. Daten automatisch auslesen lassen
+        3. Günstigen Tarif sehen
+        4. Wechsel beantragen
+        """
+    )
+    st.info("Ihre Rechnung wird nur zur Analyse verwendet und nicht gespeichert.")
+    if st.button("Jetzt Rechnung analysieren", type="primary", use_container_width=True):
+        _go_to(2)
+
+
+# ── Step 2: Upload ───────────────────────────────────────────────────────────
+
+def step_upload() -> None:
+    _step_label(1)
+    st.header("Rechnung hochladen")
+
+    if st.session_state["upload_count"] >= 3:
+        st.error(
+            "Sie haben die maximale Anzahl an Uploads erreicht. "
+            "Bitte kontaktieren Sie uns direkt."
         )
-        analyse_btn = st.button(
-            "Analyse starten",
-            disabled=uploaded_file is None,
-            type="primary",
-            use_container_width=True,
+        return
+
+    uploaded = st.file_uploader(
+        "Jahresabrechnung (JPG, PNG, HEIC oder PDF)",
+        type=["jpg", "jpeg", "png", "heic", "pdf"],
+        label_visibility="collapsed",
+    )
+
+    if uploaded:
+        if st.button("Rechnung auswerten", type="primary", use_container_width=True):
+            st.session_state["upload_count"] += 1
+            with st.spinner("Rechnung wird ausgelesen …"):
+                file_bytes = uploaded.read()
+                filename = uploaded.name
+                try:
+                    if filename.lower().endswith(".pdf"):
+                        bill, confidence = extract_from_pdf(file_bytes)
+                    else:
+                        bill, confidence = extract_bill_data(file_bytes, filename)
+                except Exception as e:
+                    st.error(f"Fehler beim Auslesen der Rechnung: {e}")
+                    return
+
+            st.session_state["bill_data"] = bill
+            st.session_state["confidence"] = confidence
+            _go_to(3)
+
+
+# ── Step 3: Review / Correct ─────────────────────────────────────────────────
+
+def step_review() -> None:
+    _step_label(2)
+    st.header("Daten prüfen")
+
+    bill: EnergyBillData = st.session_state["bill_data"]
+    confidence: float = st.session_state["confidence"]
+
+    if confidence < 0.6:
+        st.warning(
+            "Einige Werte konnten nicht sicher erkannt werden. "
+            "Bitte prüfen und korrigieren Sie die markierten Felder."
         )
 
-    with col_tariffs:
-        st.markdown("#### Welche Tarife vergleichen?")
-        all_tariffs = load_tariffs()
+    def _field_label(label: str, field_name: str) -> str:
+        missing = getattr(bill, field_name) is None
+        return f"{label} {'⚠️' if missing and confidence < 0.6 else ''}"
 
-        strom_tariffs = [t for t in all_tariffs if t.energieart == Energieart.STROM]
-        gas_tariffs = [t for t in all_tariffs if t.energieart == Energieart.GAS]
-
-        # Initialise checkbox state once
-        for t in all_tariffs:
-            key = f"tariff_{t.name}_{t.anbieter}"
-            if key not in st.session_state:
-                st.session_state[key] = True
-
-        with st.expander(f"Strom-Tarife ({len(strom_tariffs)})", expanded=True):
-            for t in strom_tariffs:
-                key = f"tariff_{t.name}_{t.anbieter}"
-                st.checkbox(f"{t.anbieter} — {t.name}", key=key)
-
-        with st.expander(f"Gas-Tarife ({len(gas_tariffs)})", expanded=True):
-            for t in gas_tariffs:
-                key = f"tariff_{t.name}_{t.anbieter}"
-                st.checkbox(f"{t.anbieter} — {t.name}", key=key)
-
-        selected_count = sum(
-            1 for t in all_tariffs if st.session_state.get(f"tariff_{t.name}_{t.anbieter}")
-        )
-        st.caption(f"{selected_count} Tarife ausgewählt")
-
-    # Run analysis when button clicked
-    if analyse_btn and uploaded_file is not None:
-        file_bytes = uploaded_file.read()
-        is_pdf = uploaded_file.type == "application/pdf"
-        with st.spinner("Analysiere Rechnung mit KI..."):
-            try:
-                if is_pdf:
-                    bill_data = extract_from_pdf(file_bytes)
-                else:
-                    bill_data = extract_bill_data(file_bytes, uploaded_file.name)
-            except Exception as e:
-                st.error(f"Fehler bei der Analyse: {e}")
-                st.stop()
-        st.session_state["bill_data"] = bill_data
-        st.rerun()
-
-# ── Post-analysis layout ────────────────────────────────────────────────────
-else:
-    bill_data: EnergyBillData = st.session_state["bill_data"]
-
-    # Reset button
-    if st.button("← Neue Rechnung analysieren"):
-        del st.session_state["bill_data"]
-        st.session_state.pop("data_confirmed", None)
-        st.rerun()
-
-    st.success("Daten erfolgreich extrahiert!")
-
-    # ── Section 1: Collapsible data review ─────────────────────────────────
-    data_confirmed = st.session_state.get("data_confirmed", False)
-    with st.expander("Erkannte Rechnungsdaten", expanded=not data_confirmed):
-        st.markdown("*Bitte prüfen und bei Bedarf korrigieren:*")
+    with st.form("review_form"):
         col1, col2 = st.columns(2)
 
         with col1:
-            anbieter = st.text_input("Anbieter", value=bill_data.anbieter or "")
-            zahlernummer = st.text_input("Zählernummer", value=bill_data.zahlernummer or "")
-            energieart_options = ["Strom", "Gas"]
-            energieart_index = 1 if bill_data.energieart == Energieart.GAS else 0
-            energieart = st.selectbox("Energieart", options=energieart_options, index=energieart_index)
+            anbieter = st.text_input(
+                _field_label("Anbieter", "anbieter"),
+                value=bill.anbieter or "",
+            )
+            energieart_options = [None, Energieart.STROM, Energieart.GAS]
+            energieart_labels = ["– bitte wählen –", "Strom", "Gas"]
+            current_idx = (
+                energieart_options.index(bill.energieart)
+                if bill.energieart in energieart_options
+                else 0
+            )
+            energieart_sel = st.selectbox(
+                _field_label("Energieart", "energieart"),
+                options=energieart_labels,
+                index=current_idx,
+            )
             jahresverbrauch = st.number_input(
-                "Jahresverbrauch (kWh)",
-                value=bill_data.jahresverbrauch_kwh or 0.0,
+                _field_label("Jahresverbrauch (kWh)", "jahresverbrauch_kwh"),
+                value=float(bill.jahresverbrauch_kwh) if bill.jahresverbrauch_kwh else 0.0,
                 min_value=0.0,
                 step=100.0,
             )
 
         with col2:
             arbeitspreis = st.number_input(
-                "Arbeitspreis (ct/kWh)",
-                value=bill_data.arbeitspreis_ct_kwh or 0.0,
+                _field_label("Arbeitspreis (ct/kWh)", "arbeitspreis_ct_kwh"),
+                value=float(bill.arbeitspreis_ct_kwh) if bill.arbeitspreis_ct_kwh else 0.0,
                 min_value=0.0,
                 step=0.1,
                 format="%.2f",
             )
             grundpreis = st.number_input(
-                "Grundpreis (EUR/Jahr)",
-                value=bill_data.grundpreis_eur_jahr or 0.0,
+                _field_label("Grundpreis (EUR/Jahr)", "grundpreis_eur_jahr"),
+                value=float(bill.grundpreis_eur_jahr) if bill.grundpreis_eur_jahr else 0.0,
                 min_value=0.0,
                 step=1.0,
                 format="%.2f",
             )
-            zahlerstand_alt = st.number_input(
-                "Zählerstand alt",
-                value=bill_data.zahlerstand_alt or 0.0,
-                step=1.0,
-            )
-            zahlerstand_neu = st.number_input(
-                "Zählerstand neu",
-                value=bill_data.zahlerstand_neu or 0.0,
-                step=1.0,
+            zahlernummer = st.text_input(
+                "Zählernummer",
+                value=bill.zahlernummer or "",
             )
 
-        if st.button("Bestätigen ✓", type="primary"):
-            st.session_state["data_confirmed"] = True
-            # Persist corrected values
-            st.session_state["corrected_bill"] = EnergyBillData(
+        confirmed = st.form_submit_button(
+            "Weiter zur Kostenanalyse", type="primary", use_container_width=True
+        )
+
+        if confirmed:
+            energieart_map = {"Strom": Energieart.STROM, "Gas": Energieart.GAS}
+            corrected = EnergyBillData(
                 anbieter=anbieter or None,
-                zahlernummer=zahlernummer or None,
-                energieart=Energieart(energieart),
+                energieart=energieart_map.get(energieart_sel),
                 jahresverbrauch_kwh=jahresverbrauch if jahresverbrauch > 0 else None,
                 arbeitspreis_ct_kwh=arbeitspreis if arbeitspreis > 0 else None,
                 grundpreis_eur_jahr=grundpreis if grundpreis > 0 else None,
-                zahlerstand_alt=zahlerstand_alt if zahlerstand_alt > 0 else None,
-                zahlerstand_neu=zahlerstand_neu if zahlerstand_neu > 0 else None,
-                verbrauchszeitraum_von=bill_data.verbrauchszeitraum_von,
-                verbrauchszeitraum_bis=bill_data.verbrauchszeitraum_bis,
+                zahlernummer=zahlernummer or None,
+                zahlerstand_alt=bill.zahlerstand_alt,
+                zahlerstand_neu=bill.zahlerstand_neu,
+                verbrauchszeitraum_von=bill.verbrauchszeitraum_von,
+                verbrauchszeitraum_bis=bill.verbrauchszeitraum_bis,
             )
-            st.rerun()
+            st.session_state["bill_data"] = corrected
 
-    # Use confirmed bill if available, otherwise fall back to live form values
-    if "corrected_bill" in st.session_state:
-        corrected_bill: EnergyBillData = st.session_state["corrected_bill"]
+            comparisons = compare_tariffs(corrected)
+            current_cost = calculate_current_cost(corrected)
+            st.session_state["current_cost"] = current_cost
+            st.session_state["best_tariff_comparison"] = comparisons[0] if comparisons else None
+
+            _go_to(4)
+
+
+# ── Step 4: Cost overview ────────────────────────────────────────────────────
+
+def step_costs() -> None:
+    _step_label(3)
+    st.header("Ihre aktuellen Energiekosten")
+
+    bill: EnergyBillData = st.session_state["bill_data"]
+    current_cost = st.session_state["current_cost"]
+    best = st.session_state["best_tariff_comparison"]
+
+    if current_cost:
+        col1, col2 = st.columns(2)
+        col1.metric("Aktuelle Jahreskosten", f"{current_cost:.2f} €")
+        if bill.arbeitspreis_ct_kwh:
+            col2.metric("Ihr Arbeitspreis", f"{bill.arbeitspreis_ct_kwh:.2f} ct/kWh")
     else:
-        corrected_bill = EnergyBillData(
-            anbieter=bill_data.anbieter,
-            zahlernummer=bill_data.zahlernummer,
-            energieart=bill_data.energieart,
-            jahresverbrauch_kwh=bill_data.jahresverbrauch_kwh,
-            arbeitspreis_ct_kwh=bill_data.arbeitspreis_ct_kwh,
-            grundpreis_eur_jahr=bill_data.grundpreis_eur_jahr,
-            zahlerstand_alt=bill_data.zahlerstand_alt,
-            zahlerstand_neu=bill_data.zahlerstand_neu,
-            verbrauchszeitraum_von=bill_data.verbrauchszeitraum_von,
-            verbrauchszeitraum_bis=bill_data.verbrauchszeitraum_bis,
+        st.info(
+            "Wir konnten die aktuellen Jahreskosten nicht berechnen. "
+            "Bitte prüfen Sie die Eingaben im vorherigen Schritt."
         )
 
-    # ── Section 2: Cost summary bar ─────────────────────────────────────────
-    if corrected_bill.jahresverbrauch_kwh:
-        current_cost = calculate_current_cost(corrected_bill)
+    if bill.verbrauchszeitraum_von and bill.verbrauchszeitraum_bis:
+        st.caption(
+            f"Abrechnungszeitraum: {bill.verbrauchszeitraum_von} – {bill.verbrauchszeitraum_bis}"
+        )
 
-        st.markdown('<div class="cost-bar">', unsafe_allow_html=True)
-        m1, m2, m3 = st.columns(3)
-        with m1:
-            cost_display = f"{current_cost:.2f} EUR" if current_cost else "—"
-            st.metric("Aktuelle Jahreskosten", cost_display)
-        with m2:
-            if corrected_bill.arbeitspreis_ct_kwh:
-                st.metric("Arbeitspreis", f"{corrected_bill.arbeitspreis_ct_kwh:.2f} ct/kWh")
-            else:
-                st.metric("Arbeitspreis", "—")
-        with m3:
-            if corrected_bill.verbrauchszeitraum_von and corrected_bill.verbrauchszeitraum_bis:
-                period = f"{corrected_bill.verbrauchszeitraum_von} – {corrected_bill.verbrauchszeitraum_bis}"
-            else:
-                period = "—"
-            st.metric("Abrechnungszeitraum", period)
-        st.markdown("</div>", unsafe_allow_html=True)
-
-        # ── Section 3: Tariff cards ─────────────────────────────────────────
-        all_tariffs = load_tariffs()
-        selected_names = {
-            f"{t.name}_{t.anbieter}"
-            for t in all_tariffs
-            if st.session_state.get(f"tariff_{t.name}_{t.anbieter}", True)
-        }
-
-        comparisons = compare_tariffs(corrected_bill)
-        comparisons = [
-            c for c in comparisons
-            if f"{c.tariff.name}_{c.tariff.anbieter}" in selected_names
-        ]
-        comparisons.sort(key=lambda c: (c.tariff.anbieter, c.tariff.name))
-
-        if comparisons:
-            st.markdown("#### Tarifvergleich")
-            for i, comp in enumerate(comparisons):
-                card_class = "tariff-card-best" if i == 0 else "tariff-card"
-                st.markdown(f'<div class="{card_class}">', unsafe_allow_html=True)
-
-                col_name, col_cost, col_save = st.columns([2, 1, 1])
-                with col_name:
-                    label = f"🥇 {comp.tariff.anbieter}" if i == 0 else comp.tariff.anbieter
-                    st.markdown(f"**{label}**  \n{comp.tariff.name}")
-                    st.caption(
-                        f"Arbeitspreis: {comp.tariff.arbeitspreis_ct_kwh} ct/kWh | "
-                        f"Grundpreis: {comp.tariff.grundpreis_eur_jahr:.2f} EUR/Jahr"
-                    )
-                with col_cost:
-                    st.metric("Jahreskosten", f"{comp.jahreskosten_eur:.2f} EUR")
-                with col_save:
-                    if comp.ersparnis_eur > 0:
-                        st.metric(
-                            "Ersparnis",
-                            f"{comp.ersparnis_eur:.2f} EUR",
-                            delta=f"+{comp.ersparnis_eur:.2f}",
-                        )
-                    elif comp.ersparnis_eur < 0:
-                        st.metric(
-                            "Mehrkosten",
-                            f"{abs(comp.ersparnis_eur):.2f} EUR",
-                            delta=f"{comp.ersparnis_eur:.2f}",
-                        )
-                    else:
-                        st.metric("Differenz", "0 EUR")
-
-                st.markdown("</div>", unsafe_allow_html=True)
-
-            best = comparisons[0]
-            if best.ersparnis_eur > 0:
-                st.success(
-                    f"Empfehlung: Wechsel zu **{best.tariff.anbieter} — {best.tariff.name}**"
-                    f" — du sparst ca. **{best.ersparnis_eur:.2f} EUR/Jahr**!"
-                )
-            else:
-                st.info("Dein aktueller Tarif ist bereits der günstigste im Vergleich.")
+    if best:
+        savings = best.ersparnis_eur
+        if savings > 0:
+            st.success(f"Mit einem günstigeren Tarif könnten Sie **ca. {savings:.0f} €/Jahr** sparen!")
         else:
-            st.warning("Keine Tarife ausgewählt oder keine passenden Tarife gefunden.")
+            st.info("Ihr aktueller Tarif ist bereits wettbewerbsfähig.")
     else:
-        st.warning("Jahresverbrauch fehlt — Tarifvergleich nicht möglich.")
+        st.info(
+            "Wir konnten keinen passenden Tarif für Ihre Region und Energieart finden. "
+            "Kontaktieren Sie uns direkt für ein individuelles Angebot."
+        )
+
+    if st.button("Angebot ansehen", type="primary", use_container_width=True):
+        _go_to(5)
+    if st.button("Zurück", use_container_width=True):
+        _go_to(3)
+
+
+# ── Step 5: Offer ─────────────────────────────────────────────────────────────
+
+def step_offer() -> None:
+    _step_label(4)
+    st.header("Ihr persönliches Angebot")
+
+    bill: EnergyBillData = st.session_state["bill_data"]
+    best = st.session_state["best_tariff_comparison"]
+    current_cost = st.session_state["current_cost"]
+
+    if not best:
+        st.warning(
+            "Leider konnten wir kein passendes Angebot ermitteln. "
+            "Bitte hinterlassen Sie Ihre Kontaktdaten – wir melden uns bei Ihnen."
+        )
+        if st.button("Kontakt aufnehmen", type="primary", use_container_width=True):
+            _go_to(6)
+        return
+
+    tariff = best.tariff
+    savings = best.ersparnis_eur
+    used_fallback_consumption = bill.jahresverbrauch_kwh is None
+
+    if used_fallback_consumption:
+        avg = 15000.0 if bill.energieart == Energieart.GAS else 3500.0
+        st.caption(
+            f"Kein Jahresverbrauch erkannt — Berechnung basiert auf Durchschnittswert {avg:,.0f} kWh."
+        )
+
+    st.markdown('<div class="savings-box">', unsafe_allow_html=True)
+    st.markdown(f"### {tariff.name}")
+    st.markdown(f"**{tariff.anbieter}**")
+
+    col1, col2 = st.columns(2)
+    col1.metric("Arbeitspreis", f"{tariff.arbeitspreis_ct_kwh:.2f} ct/kWh")
+    col2.metric("Grundpreis", f"{tariff.grundpreis_eur_jahr:.2f} €/Jahr")
+
+    st.markdown(f'<p class="big-number">{best.jahreskosten_eur:.0f} €/Jahr</p>', unsafe_allow_html=True)
+
+    if savings > 0 and current_cost:
+        st.markdown(f"**Sie sparen ca. {savings:.0f} €/Jahr** gegenüber Ihrem aktuellen Tarif.")
+    st.markdown("</div>", unsafe_allow_html=True)
+
+    st.markdown("---")
+    st.markdown(
+        "✅ Keine Vorauskasse  ✅ Kein Risiko – 14 Tage Widerrufsrecht  ✅ Lokaler Anbieter"
+    )
+
+    if st.button("Jetzt wechseln", type="primary", use_container_width=True):
+        _go_to(6)
+    if st.button("Zurück", use_container_width=True):
+        _go_to(4)
+
+
+# ── Step 6: Lead form ─────────────────────────────────────────────────────────
+
+def step_lead_form() -> None:
+    _step_label(5)
+    st.header("Kontaktdaten eingeben")
+
+    st.markdown(
+        "Wir leiten Ihre Anfrage an das zuständige Stadtwerk weiter. "
+        "Ein Mitarbeiter meldet sich innerhalb von 1 Werktag."
+    )
+
+    bill: EnergyBillData = st.session_state["bill_data"]
+    best = st.session_state["best_tariff_comparison"]
+    current_cost = st.session_state["current_cost"]
+
+    with st.form("lead_form"):
+        col1, col2 = st.columns(2)
+        first_name = col1.text_input("Vorname *")
+        last_name = col2.text_input("Nachname *")
+        email = st.text_input("E-Mail-Adresse *")
+        phone = st.text_input("Telefonnummer (optional)")
+
+        st.markdown("**Lieferadresse**")
+        street = st.text_input("Straße und Hausnummer")
+        col3, col4 = st.columns([1, 3])
+        zip_code = col3.text_input("PLZ")
+        city = col4.text_input("Ort")
+
+        st.markdown("---")
+        agreed = st.checkbox(
+            "Ich stimme den AGB und der Datenschutzerklärung zu *"
+        )
+        marketing = st.checkbox(
+            "Ich möchte Angebote und Neuigkeiten per E-Mail erhalten (optional)"
+        )
+
+        submitted = st.form_submit_button(
+            "Wechsel beantragen", type="primary", use_container_width=True
+        )
+
+        if submitted:
+            errors = []
+            if not first_name.strip():
+                errors.append("Vorname ist erforderlich.")
+            if not last_name.strip():
+                errors.append("Nachname ist erforderlich.")
+            if not email.strip():
+                errors.append("E-Mail-Adresse ist erforderlich.")
+            if not agreed:
+                errors.append("Bitte stimmen Sie den AGB und der Datenschutzerklärung zu.")
+
+            if errors:
+                for err in errors:
+                    st.error(err)
+            else:
+                try:
+                    lead = LeadData(
+                        first_name=first_name.strip(),
+                        last_name=last_name.strip(),
+                        email=email.strip(),
+                        phone=phone.strip() or None,
+                        street=street.strip() or None,
+                        zip=zip_code.strip() or None,
+                        city=city.strip() or None,
+                        energieart=bill.energieart.value if bill.energieart else None,
+                        jahresverbrauch_kwh=bill.jahresverbrauch_kwh,
+                        current_cost_eur=current_cost,
+                        offered_tariff_name=best.tariff.name if best else None,
+                        offered_tariff_anbieter=best.tariff.anbieter if best else None,
+                        estimated_savings_eur=best.ersparnis_eur if best else None,
+                        agreed_to_terms=agreed,
+                        marketing_consent=marketing,
+                    )
+                except ValidationError as e:
+                    st.error(f"Eingabefehler: {e}")
+                    return
+
+                with st.spinner("Anfrage wird übermittelt …"):
+                    try:
+                        save_lead(lead)
+                    except Exception as e:
+                        st.error(f"Speicherung fehlgeschlagen: {e}")
+                        return
+
+                    try:
+                        tariff_name = best.tariff.name if best else "Ihr neuer Tarif"
+                        savings_val = best.ersparnis_eur if best else None
+                        send_confirmation_to_user(
+                            email.strip(), first_name.strip(), tariff_name, savings_val
+                        )
+                        send_internal_notification(lead)
+                    except Exception:
+                        # E-Mail-Fehler blockiert den Lead-Flow nicht
+                        pass
+
+                _go_to(7)
+
+    if st.button("Zurück", use_container_width=True):
+        _go_to(5)
+
+
+# ── Step 7: Thank you ─────────────────────────────────────────────────────────
+
+def step_thank_you() -> None:
+    st.balloons()
+    st.success("Vielen Dank! Ihre Anfrage wurde erfolgreich übermittelt.")
+    st.markdown(
+        """
+        **Was passiert als nächstes?**
+        - Sie erhalten eine Bestätigungs-E-Mail.
+        - Ein Mitarbeiter meldet sich innerhalb von 1 Werktag bei Ihnen.
+        - Nach Ihrer Zustimmung wird der Wechsel eingeleitet.
+
+        **Widerrufsrecht**: Sie können diese Anfrage innerhalb von 14 Tagen ohne Angabe
+        von Gründen widerrufen. Senden Sie dazu eine E-Mail an widerruf@energie-funnel.de.
+        """
+    )
+    if st.button("Neue Analyse starten", use_container_width=True):
+        for key in list(st.session_state.keys()):
+            del st.session_state[key]
+        _go_to(1)
+
+
+# ── Router ────────────────────────────────────────────────────────────────────
+
+step = st.session_state["step"]
+
+if step == 1:
+    step_landing()
+elif step == 2:
+    step_upload()
+elif step == 3:
+    step_review()
+elif step == 4:
+    step_costs()
+elif step == 5:
+    step_offer()
+elif step == 6:
+    step_lead_form()
+elif step == 7:
+    step_thank_you()

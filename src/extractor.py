@@ -2,7 +2,7 @@ import anthropic
 from dotenv import load_dotenv
 
 from src.image_utils import prepare_image_for_api
-from src.models import EnergyBillData
+from src.models import EnergyBillData, Energieart
 from src.pdf_handler import pdf_to_images
 
 load_dotenv()
@@ -28,9 +28,52 @@ Wichtige Hinweise:
 
 USER_PROMPT = "Bitte extrahiere alle relevanten Daten aus dieser Energierechnung."
 
+# Plausibility ranges for extracted values
+_ARBEITSPREIS_RANGE = (5.0, 100.0)  # ct/kWh
+_GRUNDPREIS_RANGE = (0.0, 2000.0)  # EUR/Jahr
+_VERBRAUCH_STROM_RANGE = (500.0, 50000.0)  # kWh
+_VERBRAUCH_GAS_RANGE = (5000.0, 200000.0)  # kWh
+_VERBRAUCH_UNKNOWN_RANGE = (500.0, 200000.0)  # kWh (fallback)
 
-def extract_bill_data(image_bytes: bytes, filename: str) -> EnergyBillData:
-    """Extract energy bill data from a single image."""
+# Core fields that contribute to confidence scoring
+_CORE_FIELDS = ["jahresverbrauch_kwh", "arbeitspreis_ct_kwh", "grundpreis_eur_jahr", "energieart", "anbieter"]
+
+
+def _sanitize_and_score(bill: EnergyBillData) -> tuple[EnergyBillData, float]:
+    """Nullifies out-of-range values and returns (sanitized_bill, confidence_score 0–1)."""
+    data = bill.model_dump()
+
+    if data["arbeitspreis_ct_kwh"] is not None:
+        lo, hi = _ARBEITSPREIS_RANGE
+        if not (lo <= data["arbeitspreis_ct_kwh"] <= hi):
+            data["arbeitspreis_ct_kwh"] = None
+
+    if data["grundpreis_eur_jahr"] is not None:
+        lo, hi = _GRUNDPREIS_RANGE
+        if not (lo <= data["grundpreis_eur_jahr"] <= hi):
+            data["grundpreis_eur_jahr"] = None
+
+    if data["jahresverbrauch_kwh"] is not None:
+        energieart = data.get("energieart")
+        if energieart == Energieart.GAS:
+            lo, hi = _VERBRAUCH_GAS_RANGE
+        elif energieart == Energieart.STROM:
+            lo, hi = _VERBRAUCH_STROM_RANGE
+        else:
+            lo, hi = _VERBRAUCH_UNKNOWN_RANGE
+        if not (lo <= data["jahresverbrauch_kwh"] <= hi):
+            data["jahresverbrauch_kwh"] = None
+
+    sanitized = EnergyBillData(**data)
+
+    present = sum(1 for f in _CORE_FIELDS if getattr(sanitized, f) is not None)
+    confidence = present / len(_CORE_FIELDS)
+
+    return sanitized, confidence
+
+
+def extract_bill_data(image_bytes: bytes, filename: str) -> tuple[EnergyBillData, float]:
+    """Extract energy bill data from a single image. Returns (data, confidence_score)."""
     client = anthropic.Anthropic()
     b64_data, media_type = prepare_image_for_api(image_bytes, filename)
 
@@ -57,11 +100,12 @@ def extract_bill_data(image_bytes: bytes, filename: str) -> EnergyBillData:
         output_format=EnergyBillData,
     )
 
-    return response.parsed_output
+    return _sanitize_and_score(response.parsed_output)
 
 
-def extract_from_pdf(pdf_bytes: bytes) -> EnergyBillData:
-    """Extract from PDF. Sends up to 5 pages as separate images in one request."""
+def extract_from_pdf(pdf_bytes: bytes) -> tuple[EnergyBillData, float]:
+    """Extract from PDF. Sends up to 5 pages as separate images in one request.
+    Returns (data, confidence_score)."""
     client = anthropic.Anthropic()
     page_images = pdf_to_images(pdf_bytes)
 
@@ -89,4 +133,4 @@ def extract_from_pdf(pdf_bytes: bytes) -> EnergyBillData:
         output_format=EnergyBillData,
     )
 
-    return response.parsed_output
+    return _sanitize_and_score(response.parsed_output)
