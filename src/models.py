@@ -1,6 +1,6 @@
 from enum import StrEnum
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, EmailStr, Field
 
 
 class Energieart(StrEnum):
@@ -37,3 +37,23 @@ class TariffComparison(BaseModel):
     tariff: TariffInfo
     jahreskosten_eur: float
     ersparnis_eur: float
+
+
+class LeadData(BaseModel):
+    first_name: str
+    last_name: str
+    email: EmailStr
+    phone: str | None = None
+    street: str | None = None
+    zip: str | None = None
+    city: str | None = None
+    energieart: str | None = None
+    jahresverbrauch_kwh: float | None = None
+    current_cost_eur: float | None = None
+    offered_tariff_name: str | None = None
+    offered_tariff_anbieter: str | None = None
+    estimated_savings_eur: float | None = None
+    agreed_to_terms: bool
+    terms_version: str = "v1.0"
+    marketing_consent: bool = False
+    source: str = "funnel_mvp"
